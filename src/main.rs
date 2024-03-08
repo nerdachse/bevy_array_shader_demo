@@ -1,5 +1,6 @@
 use bevy::asset::LoadState;
 use bevy::pbr::light_consts::lux;
+use bevy::pbr::wireframe::{Wireframe, WireframePlugin};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, MeshVertexAttribute, VertexAttributeValues};
 use bevy::render::render_asset::RenderAssetUsages;
@@ -34,13 +35,14 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "experiment".into(),
+                        title: "greedy meshing texturing experiment".into(),
                         ..default()
                     }),
                     ..default()
                 })
                 .set(ImagePlugin::default_nearest()),
         )
+        .add_plugins(WireframePlugin)
         .add_plugins(MaterialPlugin::<ArrayTextureMaterial>::default())
         .add_plugins(PlayerPlugin)
         .init_state::<AppState>()
@@ -245,12 +247,18 @@ fn setup(
     render_mesh.insert_attribute(ATTRIBUTE_DATA, VertexAttributeValues::Uint32(data));
     render_mesh.insert_indices(Indices::U32(indices));
 
-    commands.spawn(MaterialMeshBundle {
-        mesh: meshes.add(render_mesh),
-        material: material_storage.0.clone(),
-        transform: Transform::from_translation(Vec3::splat(-10.0)),
-        ..Default::default()
-    });
+    commands.spawn((
+        MaterialMeshBundle {
+            mesh: meshes.add(render_mesh),
+            material: material_storage.0.clone(),
+            transform: Transform::from_translation(Vec3::splat(-10.0)),
+            ..Default::default()
+        },
+        Wireframe,
+        ShowAabbGizmo {
+            color: Some(Color::BLACK),
+        },
+    ));
 
     commands.spawn(PointLightBundle {
         transform: Transform::from_translation(Vec3::new(0.0, 5.0, 0.0)),

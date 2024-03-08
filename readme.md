@@ -1,6 +1,8 @@
 # Minecraft like mesh shader rendering Demo used block_mesh for Bevy.
-![demo](image.png) 
 
+Uses greedy meshing and a texture array!
+
+![demo](image.png) 
 
 Reference:
 - [array_texture_demo](https://github.com/bevyengine/bevy/blob/release-0.10.1/examples/shader/array_texture.rs)
