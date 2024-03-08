@@ -1,33 +1,22 @@
 use bevy::asset::LoadState;
+use bevy::pbr::light_consts::lux;
 use bevy::prelude::*;
-use bevy::reflect::{TypeData, TypeUuid};
 use bevy::render::mesh::{Indices, MeshVertexAttribute, VertexAttributeValues};
-use bevy::render::render_resource::{
-    AddressMode, AsBindGroup, PrimitiveTopology, SamplerDescriptor, ShaderRef, VertexFormat,
-};
-use bevy::render::texture::{self, ImageSampler};
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::{AsBindGroup, PrimitiveTopology, ShaderRef, VertexFormat};
+use bevy::render::texture::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy_flycam::PlayerPlugin;
 use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use block_mesh::{
     greedy_quads, GreedyQuadsBuffer, MergeVoxel, Voxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
 };
 
-#[derive(Default, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Default, States, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum AppState {
     #[default]
     Loading,
     Run,
 }
-
-impl States for AppState {
-    type Iter = std::array::IntoIter<AppState, 2>;
-
-    fn variants() -> Self::Iter {
-        [Self::Loading, Self::Run].into_iter()
-    }
-}
-
-const UV_SCALE: f32 = 1.0 / 20.0;
 
 #[derive(Resource)]
 struct Loading {
@@ -41,20 +30,28 @@ pub const ATTRIBUTE_DATA: MeshVertexAttribute =
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugin(MaterialPlugin::<ArrayTextureMaterial>::default())
-        .add_plugin(PlayerPlugin)
-        .add_state::<AppState>()
-        .add_system(load_assets.in_schedule(OnEnter(AppState::Loading)))
-        .add_system(check_loaded.in_set(OnUpdate(AppState::Loading)))
-        .add_system(setup.in_schedule(OnEnter(AppState::Run)))
-        // .add_system(camera_rotation_system.in_set(OnUpdate(AppState::Run)))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "experiment".into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(ImagePlugin::default_nearest()),
+        )
+        .add_plugins(MaterialPlugin::<ArrayTextureMaterial>::default())
+        .add_plugins(PlayerPlugin)
+        .init_state::<AppState>()
+        .add_systems(OnEnter(AppState::Loading), load_assets)
+        .add_systems(Update, check_loaded.run_if(in_state(AppState::Loading)))
+        .add_systems(OnEnter(AppState::Run), setup)
         .run();
 }
 
 fn load_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     debug!("load");
-    // let handle = asset_server.load("uv_checker.png");
     let handle = asset_server.load("array_texture.png");
 
     commands.insert_resource(Loading {
@@ -73,14 +70,14 @@ fn check_loaded(
     mut commands: Commands,
 ) {
     debug!("check loaded");
-    if let LoadState::Loaded = asset_server.get_load_state(&handle.handle) {
+    if let Some(LoadState::Loaded) = asset_server.get_load_state(&handle.handle) {
         handle.is_loaded = true;
         let image: &mut Image = images.get_mut(&handle.handle).unwrap();
         let array_layers = 4;
         image.reinterpret_stacked_2d_as_array(array_layers);
-        image.sampler_descriptor = ImageSampler::Descriptor(SamplerDescriptor {
-            address_mode_u: AddressMode::Repeat,
-            address_mode_v: AddressMode::Repeat,
+        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
             ..Default::default()
         });
         let a = materials.add(ArrayTextureMaterial {
@@ -94,8 +91,7 @@ fn check_loaded(
 #[derive(Debug, Resource)]
 struct MaterialStorge(Handle<ArrayTextureMaterial>);
 
-#[derive(AsBindGroup, Debug, Clone, TypeUuid)]
-#[uuid = "9c5a0ddf-1eaf-41b4-9832-ed736fd26af3"]
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 struct ArrayTextureMaterial {
     #[texture(0, dimension = "2d_array")]
     #[sampler(1)]
@@ -104,11 +100,11 @@ struct ArrayTextureMaterial {
 
 impl Material for ArrayTextureMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/array_texture-2.wgsl".into()
+        "shaders/chunk.wgsl".into()
     }
 
     fn vertex_shader() -> ShaderRef {
-        "shaders/array_texture-2.wgsl".into()
+        "shaders/chunk.wgsl".into()
     }
 
     fn specialize(
@@ -132,10 +128,10 @@ impl Material for ArrayTextureMaterial {
 struct BoolVoxel(u8);
 
 impl BoolVoxel {
-    pub const Empty: Self = BoolVoxel(0);
-    pub const Grass: Self = BoolVoxel(1);
-    pub const Sold: Self = BoolVoxel(2);
-    pub const Sonw: Self = BoolVoxel(3);
+    pub const EMPTY: Self = BoolVoxel(0);
+    pub const GRASS: Self = BoolVoxel(1);
+    pub const SOIL: Self = BoolVoxel(2);
+    pub const SNOW: Self = BoolVoxel(3);
 }
 
 impl MergeVoxel for BoolVoxel {
@@ -159,23 +155,15 @@ impl Voxel for BoolVoxel {
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut material_storge: ResMut<MaterialStorge>,
+    material_storage: ResMut<MaterialStorge>,
 ) {
     debug!("setup");
-    // let mut texture = textures.get_mut(&texture_handle.0).unwrap();
-
-    // Set the texture to tile over the entire quad
-    // texture.sampler_descriptor = ImageSampler::Descriptor(SamplerDescriptor {
-    //     address_mode_u: AddressMode::Repeat,
-    //     address_mode_v: AddressMode::Repeat,
-    //     ..Default::default()
-    // });
 
     type SampleShape = ConstShape3u32<22, 22, 22>;
 
     // Just a solid cube of voxels. We only fill the interior since we need some empty voxels to form a boundary for the mesh.
     // 这是一堆立方体体素组成的实心立方体。我们只填充内部，因为我们需要一些空的体素来形成网格的边界。
-    let mut voxels = [BoolVoxel::Empty; SampleShape::SIZE as usize];
+    let mut voxels = [BoolVoxel::EMPTY; SampleShape::SIZE as usize];
     // 这里用一串数据表示一个立体的空间
     for z in 1..21 {
         for y in 1..21 {
@@ -183,14 +171,13 @@ fn setup(
                 let i = SampleShape::linearize([x, y, z]);
                 if ((x * x + y * y + z * z) as f32).sqrt() < 20.0 {
                     if y < 5 {
-                        voxels[i as usize] = BoolVoxel::Grass;
+                        voxels[i as usize] = BoolVoxel::SOIL;
                     } else if y < 10 {
-                        voxels[i as usize] = BoolVoxel::Sonw;
+                        voxels[i as usize] = BoolVoxel::GRASS;
                     } else {
-                        voxels[i as usize] = BoolVoxel::Sold;
+                        voxels[i as usize] = BoolVoxel::SNOW;
                     }
                 }
-                // }
             }
         }
     }
@@ -247,38 +234,34 @@ fn setup(
         }
     }
 
-    let mut render_mesh = Mesh::new(PrimitiveTopology::TriangleList);
-
-    // 这里没有缩放 每个格子会占据一个图片？
-
-    // for uv in tex_coords.iter_mut() {
-    //     for c in uv.iter_mut() {
-    //         *c *= UV_SCALE;
-    //     }
-    // }
+    let mut render_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
 
     render_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     render_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     render_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, tex_coords);
     render_mesh.insert_attribute(ATTRIBUTE_DATA, VertexAttributeValues::Uint32(data));
-    render_mesh.set_indices(Some(Indices::U32(indices)));
+    render_mesh.insert_indices(Indices::U32(indices));
 
     commands.spawn(MaterialMeshBundle {
         mesh: meshes.add(render_mesh),
-        // material: materials.add(texture_handle.0.clone().into()),
-        material: material_storge.0.clone(),
+        material: material_storage.0.clone(),
         transform: Transform::from_translation(Vec3::splat(-10.0)),
         ..Default::default()
     });
 
     commands.spawn(PointLightBundle {
-        transform: Transform::from_translation(Vec3::new(0.0, 50.0, 50.0)),
+        transform: Transform::from_translation(Vec3::new(0.0, 5.0, 0.0)),
         point_light: PointLight {
             range: 200.0,
-            intensity: 20000.0,
             ..Default::default()
         },
         ..Default::default()
     });
-    //
+    commands.insert_resource(AmbientLight {
+        brightness: lux::OVERCAST_DAY,
+        ..default()
+    });
 }
