@@ -1,10 +1,12 @@
-use bevy::asset::LoadState;
+use bevy::asset::{LoadState, LoadedFolder};
 use bevy::pbr::light_consts::lux;
 use bevy::pbr::wireframe::{Wireframe, WireframePlugin};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, MeshVertexAttribute, VertexAttributeValues};
 use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::{AsBindGroup, PrimitiveTopology, ShaderRef, VertexFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, PrimitiveTopology, ShaderRef, TextureDimension, VertexFormat,
+};
 use bevy::render::texture::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy_flycam::PlayerPlugin;
 use block_mesh::ndshape::{ConstShape, ConstShape3u32};
@@ -16,16 +18,10 @@ use block_mesh::{
 enum AppState {
     #[default]
     Loading,
+    PrepareTextureArray,
     Run,
 }
 
-#[derive(Resource)]
-struct Loading {
-    is_loaded: bool,
-    handle: Handle<Image>,
-}
-
-// 给Vertex Attribute 添加的值
 pub const ATTRIBUTE_DATA: MeshVertexAttribute =
     MeshVertexAttribute::new("Vertex_Data", 0x696969, VertexFormat::Uint32);
 
@@ -46,52 +42,104 @@ fn main() {
         .add_plugins(MaterialPlugin::<ArrayTextureMaterial>::default())
         .add_plugins(PlayerPlugin)
         .init_state::<AppState>()
-        .add_systems(OnEnter(AppState::Loading), load_assets)
-        .add_systems(Update, check_loaded.run_if(in_state(AppState::Loading)))
+        .add_systems(OnEnter(AppState::Loading), start_load_images)
+        .add_systems(
+            OnEnter(AppState::PrepareTextureArray),
+            process_loaded_images_as_array_texture,
+        )
+        .add_systems(
+            Update,
+            check_all_images_loaded.run_if(in_state(AppState::Loading)),
+        )
         .add_systems(OnEnter(AppState::Run), setup)
         .run();
 }
 
-fn load_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
-    debug!("load");
-    let handle = asset_server.load("array_texture.png");
+#[derive(Resource)]
+struct BlockImageFolder(Handle<LoadedFolder>);
 
-    commands.insert_resource(Loading {
-        is_loaded: false,
-        handle,
-    });
+fn start_load_images(mut cmd: Commands, ass: Res<AssetServer>) {
+    cmd.insert_resource(BlockImageFolder(ass.load_folder("block-images")));
 }
 
-/// Make sure that our texture is loaded so we can change some settings on it later
-fn check_loaded(
+fn check_all_images_loaded(
     mut next_state: ResMut<NextState<AppState>>,
-    mut handle: ResMut<Loading>,
-    mut images: ResMut<Assets<Image>>,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<ArrayTextureMaterial>>,
-    mut commands: Commands,
+    mut events: EventReader<AssetEvent<LoadedFolder>>,
+    block_image_folder: ResMut<BlockImageFolder>,
 ) {
-    debug!("check loaded");
-    if let Some(LoadState::Loaded) = asset_server.get_load_state(&handle.handle) {
-        handle.is_loaded = true;
-        let image: &mut Image = images.get_mut(&handle.handle).unwrap();
-        let array_layers = 4;
-        image.reinterpret_stacked_2d_as_array(array_layers);
-        image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            address_mode_u: ImageAddressMode::Repeat,
-            address_mode_v: ImageAddressMode::Repeat,
-            ..Default::default()
-        });
-        let a = materials.add(ArrayTextureMaterial {
-            array_texture: handle.handle.clone(),
-        });
-        commands.insert_resource(MaterialStorge(a));
-        next_state.set(AppState::Run);
+    for event in events.read() {
+        if event.is_loaded_with_dependencies(&block_image_folder.0) {
+            next_state.set(AppState::PrepareTextureArray);
+        }
     }
 }
 
+fn process_loaded_images_as_array_texture(
+    mut next_state: ResMut<NextState<AppState>>,
+    mut cmd: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<ArrayTextureMaterial>>,
+    loaded_folders: Res<Assets<LoadedFolder>>,
+    block_image_folder: Res<BlockImageFolder>,
+) {
+    let mut loaded_images: Vec<&Image> = Vec::new();
+    let loaded_folder: &LoadedFolder = loaded_folders
+        .get(&block_image_folder.0)
+        .expect("block_image_folder be loaded");
+
+    for handle in loaded_folder.handles.iter() {
+        let id = handle.id().typed_unchecked::<Image>();
+        let Some(image) = images.get(id) else {
+            warn!(
+                "{:?} did not resolve to an `Image` asset.",
+                handle.path().unwrap()
+            );
+            continue;
+        };
+        loaded_images.push(image);
+    }
+
+    if loaded_images.len() == 0 {
+        panic!("no images loaded!");
+    }
+
+    info!("loaded {} images", loaded_images.len());
+
+    let model = loaded_images[0];
+    info!(
+        "first image is used as model: width: {}, height: {}",
+        model.width(),
+        model.height()
+    );
+    let mut array_texture = Image::new(
+        Extent3d {
+            width: model.width(),
+            height: model.height(),
+            depth_or_array_layers: loaded_images.len() as u32,
+        },
+        TextureDimension::D2,
+        loaded_images
+            .into_iter()
+            .flat_map(|i| i.data.clone())
+            .collect(),
+        model.texture_descriptor.format,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    array_texture.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..Default::default()
+    });
+    let handle = images.add(array_texture);
+    let handle = materials.add(ArrayTextureMaterial {
+        array_texture: handle,
+    });
+    cmd.insert_resource(MaterialStorage(handle));
+    next_state.set(AppState::Run);
+}
+
 #[derive(Debug, Resource)]
-struct MaterialStorge(Handle<ArrayTextureMaterial>);
+struct MaterialStorage(Handle<ArrayTextureMaterial>);
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 struct ArrayTextureMaterial {
@@ -110,10 +158,10 @@ impl Material for ArrayTextureMaterial {
     }
 
     fn specialize(
-        pipeline: &bevy::pbr::MaterialPipeline<Self>,
+        _pipeline: &bevy::pbr::MaterialPipeline<Self>,
         descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
         layout: &bevy::render::mesh::MeshVertexBufferLayout,
-        key: bevy::pbr::MaterialPipelineKey<Self>,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         let vertex_layout = layout.get_layout(&[
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
@@ -157,7 +205,7 @@ impl Voxel for BoolVoxel {
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    material_storage: ResMut<MaterialStorge>,
+    material_storage: ResMut<MaterialStorage>,
 ) {
     debug!("setup");
 
